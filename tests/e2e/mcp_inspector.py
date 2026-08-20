@@ -113,9 +113,9 @@ class MCPInspector:
         args = ["--method", "tools/call", "--tool-name", name]
 
         if arguments:
-            # Preserve the complete object and nested values instead of using
-            # Inspector's lossy key/value argument parser.
-            args.extend(["--tool-args-json", json.dumps(arguments)])
+            for key, value in arguments.items():
+                str_value = value if isinstance(value, str) else json.dumps(value)
+                args.extend(["--tool-arg", f"{key}={str_value}"])
 
         return self._run_inspector(args)
 
