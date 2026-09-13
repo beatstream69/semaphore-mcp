@@ -14,8 +14,8 @@ import requests
 
 DEFAULT_REQUEST_TIMEOUT = 30.0
 
-# Returns the API token to use for the current request, or None to fall back to
-# the static token the client was created with.
+# Returns the API token for the current request (e.g. the bearer token the MCP
+# client sent), or None. Consulted only when the client has no static token.
 TokenProvider = Callable[[], Optional[str]]
 
 
@@ -50,9 +50,10 @@ class SemaphoreAPIClient:
             base_url: Base URL of the SemaphoreUI API (e.g., "http://localhost:3000")
             token: Optional API token for authentication
             request_timeout: Timeout in seconds for SemaphoreUI API requests
-            token_provider: Optional callable consulted on every request; when it
-                returns a token it is used instead of ``token`` (e.g. the bearer
-                token sent by the MCP client on the current HTTP request)
+            token_provider: Optional callable consulted on every request when no
+                static token is configured (e.g. it returns the bearer token the
+                MCP client sent on the current HTTP request). A configured
+                ``token`` always wins; the provider is then never consulted.
         """
         self.base_url = base_url.rstrip("/")
         self.token = token or os.environ.get("SEMAPHORE_API_TOKEN")
@@ -68,15 +69,17 @@ class SemaphoreAPIClient:
         )
 
     def _request_token(self) -> Optional[str]:
-        """Resolve the token for the current request: provider first, then static."""
-        if self.token_provider is not None:
-            token = self.token_provider()
-            if token:
-                return token
-        return self.token
+        """Per-request token from the provider, only when no static token is set.
+
+        With a static token the session already carries the Authorization
+        header and client-supplied tokens are ignored.
+        """
+        if self.token or self.token_provider is None:
+            return None
+        return self.token_provider()
 
     def _auth_headers(self) -> dict[str, str]:
-        """Per-request headers carrying the resolved token (empty if none)."""
+        """Per-request Authorization header for a provider token (empty if none)."""
         token = self._request_token()
         if not token:
             return {}
@@ -912,9 +915,11 @@ class SemaphoreAPIClient:
     def get_task_raw_output(self, project_id: int, task_id: int) -> str:
         """Get raw task output."""
         url = f"{self.base_url}/api/project/{project_id}/tasks/{task_id}/raw_output"
-        response = self.session.request(
-            "GET", url, timeout=self.request_timeout, headers=self._auth_headers()
-        )
+        request_kwargs: dict[str, Any] = {"timeout": self.request_timeout}
+        headers = self._auth_headers()
+        if headers:
+            request_kwargs["headers"] = headers
+        response = self.session.request("GET", url, **request_kwargs)
         response.raise_for_status()
 
         # Return raw text content instead of trying to parse as JSON
@@ -1318,8 +1323,8 @@ def create_client(
     Args:
         base_url: Base URL of the SemaphoreUI API (default: from environment)
         token: API token for authentication (default: from environment)
-        token_provider: Optional per-request token source that takes precedence
-            over ``token`` (see SemaphoreAPIClient)
+        token_provider: Optional per-request token source, used only when no
+            static token is configured (see SemaphoreAPIClient)
 
     Returns:
         Configured SemaphoreAPIClient

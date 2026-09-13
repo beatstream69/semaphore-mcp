@@ -43,9 +43,10 @@ class SemaphoreMCPServer:
 
         Args:
             semaphore_url: SemaphoreUI API URL
-            semaphore_token: SemaphoreUI API token. Optional with the HTTP
-                transport: the ``Authorization: Bearer`` header sent by the MCP
-                client is forwarded to SemaphoreUI and takes precedence.
+            semaphore_token: SemaphoreUI API token. When set it is always used
+                and client tokens are ignored. Optional with the HTTP transport:
+                without it, the ``Authorization: Bearer`` header sent by the MCP
+                client is forwarded to SemaphoreUI.
             host: Host to bind to (for HTTP transport)
             port: Port to listen on (for HTTP transport)
         """
@@ -184,9 +185,10 @@ class SemaphoreMCPServer:
 
         With the HTTP transport every tool call runs inside a request context
         that carries the incoming HTTP request; its ``Authorization: Bearer``
-        header is forwarded to SemaphoreUI. Returns None outside a request, on
-        the stdio transport (no HTTP headers), or when the header is absent;
-        the API client then falls back to the static token.
+        header is forwarded to SemaphoreUI when no static token is configured
+        (the API client never consults this with a static token). Returns None
+        outside a request, on the stdio transport (no HTTP headers), or when
+        the header is absent.
         """
         try:
             request = self.mcp.get_context().request_context.request

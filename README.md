@@ -108,14 +108,14 @@ For more details, see [Docker's networking documentation](https://docs.docker.co
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `SEMAPHORE_URL` | Yes | - | URL to your SemaphoreUI instance |
-| `SEMAPHORE_API_TOKEN` | stdio: Yes, http: No | - | API token from SemaphoreUI. With the `http` transport it can be omitted and supplied by each MCP client instead, see [Per-client tokens](#per-client-tokens-token-passthrough) |
+| `SEMAPHORE_API_TOKEN` | stdio: Yes, http: No | - | API token from SemaphoreUI. When set it is always used. With the `http` transport it can be omitted and supplied by each MCP client instead, see [Per-client tokens](#per-client-tokens-token-passthrough) |
 | `MCP_TRANSPORT` | No | `http` | Transport mode: `http` or `stdio` |
 | `MCP_HOST` | No | `0.0.0.0` | Host to bind to |
 | `MCP_PORT` | No | `8000` | Port to listen on |
 
 ## Per-client tokens (token passthrough)
 
-With the `http` transport the MCP server forwards the `Authorization: Bearer <token>` header of each incoming MCP request to SemaphoreUI. Every client (a user, an agent, an automation) then acts with its own SemaphoreUI token and permissions, and the server needs no shared token of its own:
+With the `http` transport and no `SEMAPHORE_API_TOKEN`, the MCP server forwards the `Authorization: Bearer <token>` header of each incoming MCP request to SemaphoreUI. Every client (a user, an agent, an automation) then acts with its own SemaphoreUI token and permissions, and the server needs no shared token of its own:
 
 ```bash
 docker run -d --name semaphore-mcp \
@@ -150,10 +150,10 @@ claude mcp add --transport http semaphore http://127.0.0.1:8500/mcp \
 
 Rules:
 
-- A token sent by the client takes precedence over `SEMAPHORE_API_TOKEN`.
-- Requests without an `Authorization` header use `SEMAPHORE_API_TOKEN`; if that is unset too, SemaphoreUI answers `401`.
-- The `stdio` transport carries no HTTP headers, so it still needs `SEMAPHORE_API_TOKEN`.
-- The token travels in the MCP request, so expose the server over TLS (a reverse proxy) or keep it on localhost.
+- If `SEMAPHORE_API_TOKEN` is set, it is always used and tokens sent by clients are ignored. The operator decides which mode the server runs in.
+- Without `SEMAPHORE_API_TOKEN`, each request uses the client's header; a request without one reaches SemaphoreUI unauthenticated and gets `401`.
+- The `stdio` transport carries no HTTP headers, so it always needs `SEMAPHORE_API_TOKEN`.
+- The server does not validate forwarded tokens; it relays them. Expose it over TLS (a reverse proxy) or keep it on localhost, and treat it as trusted only as far as SemaphoreUI itself is.
 
 ## What You Can Do
 

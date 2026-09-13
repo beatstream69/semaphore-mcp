@@ -1,6 +1,7 @@
 """
-Tests for API token passthrough: the bearer token sent by the MCP client on the
-HTTP transport is forwarded to SemaphoreUI instead of a static token.
+Tests for API token passthrough: without a static SEMAPHORE_API_TOKEN, the bearer
+token sent by the MCP client on the HTTP transport is forwarded to SemaphoreUI.
+A configured static token always wins and client tokens are ignored.
 """
 
 from unittest.mock import MagicMock, PropertyMock, patch
@@ -11,6 +12,7 @@ from semaphore_mcp.api import SemaphoreAPIClient, create_client, parse_bearer_to
 from semaphore_mcp.server import SemaphoreMCPServer
 
 BASE_URL = "http://test.example.com"
+NO_STATIC_TOKEN = {"SEMAPHORE_API_TOKEN": ""}
 
 
 def _ok_response(payload):
@@ -37,6 +39,16 @@ def _http_request(authorization=None):
     return request
 
 
+def _client_without_static_token(token_provider):
+    with patch.dict("os.environ", NO_STATIC_TOKEN):
+        return SemaphoreAPIClient(BASE_URL, token_provider=token_provider)
+
+
+def _server_without_static_token():
+    with patch.dict("os.environ", NO_STATIC_TOKEN):
+        return SemaphoreMCPServer(BASE_URL, "")
+
+
 class TestParseBearerToken:
     @pytest.mark.parametrize(
         "value,expected",
@@ -57,40 +69,40 @@ class TestParseBearerToken:
 
 
 class TestClientTokenResolution:
-    def test_provider_token_overrides_static_token(self):
-        client = SemaphoreAPIClient(
-            BASE_URL, token="static-token", token_provider=lambda: "client-token"
-        )
-        with patch.object(
-            client.session, "request", return_value=_ok_response([])
-        ) as request:
-            client.list_projects()
-
-        headers = request.call_args.kwargs["headers"]
-        assert headers["Authorization"] == "Bearer client-token"
-
-    def test_falls_back_to_static_token_without_provider_token(self):
-        client = SemaphoreAPIClient(
-            BASE_URL, token="static-token", token_provider=lambda: None
-        )
-        with patch.object(
-            client.session, "request", return_value=_ok_response([])
-        ) as request:
-            client.list_projects()
-
-        headers = request.call_args.kwargs["headers"]
-        assert headers["Authorization"] == "Bearer static-token"
-
-    def test_no_token_at_all_sends_no_authorization(self):
-        with patch.dict("os.environ", {"SEMAPHORE_API_TOKEN": ""}):
-            client = SemaphoreAPIClient(BASE_URL, token_provider=lambda: None)
+    def test_provider_token_used_without_static_token(self):
+        client = _client_without_static_token(lambda: "client-token")
         with patch.object(
             client.session, "request", return_value=_ok_response([])
         ) as request:
             client.list_projects()
 
         assert "Authorization" not in client.session.headers
-        assert "Authorization" not in request.call_args.kwargs.get("headers", {})
+        headers = request.call_args.kwargs["headers"]
+        assert headers["Authorization"] == "Bearer client-token"
+
+    def test_static_token_wins_and_provider_is_ignored(self):
+        provider = MagicMock(return_value="client-token")
+        client = SemaphoreAPIClient(
+            BASE_URL, token="static-token", token_provider=provider
+        )
+        with patch.object(
+            client.session, "request", return_value=_ok_response([])
+        ) as request:
+            client.list_projects()
+
+        provider.assert_not_called()
+        assert client.session.headers["Authorization"] == "Bearer static-token"
+        assert "headers" not in request.call_args.kwargs
+
+    def test_no_token_at_all_sends_no_authorization(self):
+        client = _client_without_static_token(lambda: None)
+        with patch.object(
+            client.session, "request", return_value=_ok_response([])
+        ) as request:
+            client.list_projects()
+
+        assert "Authorization" not in client.session.headers
+        assert "headers" not in request.call_args.kwargs
 
     def test_static_token_without_provider_is_unchanged(self):
         client = SemaphoreAPIClient(BASE_URL, token="static-token")
@@ -100,12 +112,11 @@ class TestClientTokenResolution:
             client.list_projects()
 
         assert client.session.headers["Authorization"] == "Bearer static-token"
-        headers = request.call_args.kwargs["headers"]
-        assert headers["Authorization"] == "Bearer static-token"
+        request.assert_called_once_with("GET", f"{BASE_URL}/api/projects", timeout=30.0)
 
     def test_provider_is_consulted_on_every_request(self):
         tokens = iter(["first", "second"])
-        client = SemaphoreAPIClient(BASE_URL, token_provider=lambda: next(tokens))
+        client = _client_without_static_token(lambda: next(tokens))
         with patch.object(
             client.session, "request", return_value=_ok_response([])
         ) as request:
@@ -116,7 +127,7 @@ class TestClientTokenResolution:
         assert sent == ["Bearer first", "Bearer second"]
 
     def test_explicit_headers_are_preserved(self):
-        client = SemaphoreAPIClient(BASE_URL, token_provider=lambda: "client-token")
+        client = _client_without_static_token(lambda: "client-token")
         with patch.object(
             client.session, "request", return_value=_ok_response({})
         ) as request:
@@ -126,7 +137,17 @@ class TestClientTokenResolution:
         assert headers["X-Custom"] == "1"
         assert headers["Authorization"] == "Bearer client-token"
 
-    def test_raw_output_uses_request_token(self):
+    def test_raw_output_uses_provider_token(self):
+        client = _client_without_static_token(lambda: "client-token")
+        response = MagicMock()
+        response.text = "raw output"
+        with patch.object(client.session, "request", return_value=response) as request:
+            assert client.get_task_raw_output(1, 2) == "raw output"
+
+        headers = request.call_args.kwargs["headers"]
+        assert headers["Authorization"] == "Bearer client-token"
+
+    def test_raw_output_with_static_token_adds_no_headers(self):
         client = SemaphoreAPIClient(
             BASE_URL, token="static-token", token_provider=lambda: "client-token"
         )
@@ -135,8 +156,9 @@ class TestClientTokenResolution:
         with patch.object(client.session, "request", return_value=response) as request:
             assert client.get_task_raw_output(1, 2) == "raw output"
 
-        headers = request.call_args.kwargs["headers"]
-        assert headers["Authorization"] == "Bearer client-token"
+        request.assert_called_once_with(
+            "GET", f"{BASE_URL}/api/project/1/tasks/2/raw_output", timeout=30.0
+        )
 
     def test_create_client_accepts_provider(self):
         provider = MagicMock(return_value="client-token")
@@ -182,8 +204,8 @@ class TestServerRequestToken:
         server = SemaphoreMCPServer(BASE_URL, "static-token")
         assert server.get_request_token() is None
 
-    def test_header_token_reaches_semaphore_api(self):
-        server = SemaphoreMCPServer(BASE_URL, "static-token")
+    def test_header_token_reaches_semaphore_api_without_static_token(self):
+        server = _server_without_static_token()
         ctx = _mcp_context(_http_request("Bearer client-token"))
         with patch.object(server.mcp, "get_context", return_value=ctx):
             with patch.object(
@@ -194,29 +216,29 @@ class TestServerRequestToken:
         headers = request.call_args.kwargs["headers"]
         assert headers["Authorization"] == "Bearer client-token"
 
-    def test_static_token_used_when_client_sends_none(self):
+    def test_static_token_ignores_client_header(self):
         server = SemaphoreMCPServer(BASE_URL, "static-token")
-        ctx = _mcp_context(_http_request())
+        ctx = _mcp_context(_http_request("Bearer client-token"))
         with patch.object(server.mcp, "get_context", return_value=ctx):
             with patch.object(
                 server.semaphore.session, "request", return_value=_ok_response([])
             ) as request:
                 server.semaphore.list_projects()
 
-        headers = request.call_args.kwargs["headers"]
-        assert headers["Authorization"] == "Bearer static-token"
+        assert "headers" not in request.call_args.kwargs
+        assert (
+            server.semaphore.session.headers["Authorization"] == "Bearer static-token"
+        )
 
     def test_run_logs_passthrough_mode_without_static_token(self, caplog):
-        with patch.dict("os.environ", {"SEMAPHORE_API_TOKEN": ""}):
-            server = SemaphoreMCPServer(BASE_URL, "")
+        server = _server_without_static_token()
         with patch.object(server.mcp, "run"):
             with caplog.at_level("INFO", logger="semaphore_mcp"):
                 server.run(transport="http")
         assert "forwarding the Authorization: Bearer token" in caplog.text
 
     def test_run_warns_without_token_on_stdio(self, caplog):
-        with patch.dict("os.environ", {"SEMAPHORE_API_TOKEN": ""}):
-            server = SemaphoreMCPServer(BASE_URL, "")
+        server = _server_without_static_token()
         with patch.object(server.mcp, "run"):
             with caplog.at_level("WARNING", logger="semaphore_mcp"):
                 server.run(transport="stdio")
